@@ -83,9 +83,9 @@ public class BytecodeDSLCompiler {
          * when __future__.annotations is imported.
          */
         int futureLineNumber = parseFuture(mod, futureFeatures, parserCallbacks);
-        AstOptimizer.optimize(mod, optimize, futureFeatures.contains(FutureFeature.ANNOTATIONS));
+        AstOptimizer astOptimizer = AstOptimizer.optimize(mod, optimize, futureFeatures.contains(FutureFeature.ANNOTATIONS));
         ScopeEnvironment scopeEnvironment = ScopeEnvironment.analyze(mod, parserCallbacks, futureFeatures);
-        BytecodeDSLCompilerContext ctx = new BytecodeDSLCompilerContext(language, mod, source, optimize, futureFeatures, futureLineNumber, parserCallbacks, scopeEnvironment);
+        BytecodeDSLCompilerContext ctx = new BytecodeDSLCompilerContext(language, mod, source, optimize, futureFeatures, futureLineNumber, parserCallbacks, scopeEnvironment, astOptimizer);
         RootNodeCompiler compiler = new RootNodeCompiler(ctx, null, mod, futureFeatures);
         return compiler.compile();
     }
@@ -201,11 +201,12 @@ public class BytecodeDSLCompiler {
         public final int futureLineNumber;
         public final ParserCallbacksImpl errorCallback;
         public final ScopeEnvironment scopeEnvironment;
+        public final AstOptimizer astOptimizer;
         // Store code units for possible reparses
         public final Map<Object, BytecodeDSLCodeUnit> codeUnits = new HashMap<>();
 
         public BytecodeDSLCompilerContext(PythonLanguage language, ModTy mod, Source source, int optimizationLevel,
-                        EnumSet<FutureFeature> futureFeatures, int futureLineNumber, ParserCallbacksImpl errorCallback, ScopeEnvironment scopeEnvironment) {
+                        EnumSet<FutureFeature> futureFeatures, int futureLineNumber, ParserCallbacksImpl errorCallback, ScopeEnvironment scopeEnvironment, AstOptimizer astOptimizer) {
             this.language = language;
             this.mod = mod;
             this.source = source;
@@ -214,6 +215,7 @@ public class BytecodeDSLCompiler {
             this.futureLineNumber = futureLineNumber;
             this.errorCallback = errorCallback;
             this.scopeEnvironment = scopeEnvironment;
+            this.astOptimizer = astOptimizer;
         }
 
         public String maybeMangle(String privateName, Scope scope, String name) {

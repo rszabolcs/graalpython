@@ -68,6 +68,9 @@ import com.oracle.truffle.api.debug.DebugScope;
 import com.oracle.truffle.api.debug.DebugStackFrame;
 import com.oracle.truffle.api.debug.DebugValue;
 import com.oracle.truffle.api.debug.DebuggerSession;
+import com.oracle.truffle.api.debug.SourceElement;
+import com.oracle.truffle.api.debug.StepConfig;
+import com.oracle.truffle.api.debug.SuspendAnchor;
 import com.oracle.truffle.api.debug.SuspendedCallback;
 import com.oracle.truffle.api.debug.SuspendedEvent;
 import com.oracle.truffle.tck.DebuggerTester;
@@ -714,6 +717,121 @@ public class PythonDebugTest {
                 assertEquals(3, frame.getSourceSection().getStartLine());
                 event.prepareContinue();
             });
+        }
+    }
+
+    @Test
+    public void testComparisonExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        same = name == 'admin'
+                        """, "name = guest", "'admin' = admin", "name == 'admin' = False");
+    }
+
+    @Test
+    public void testMembershipTestExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        found = name in ('admin', 'guest')
+                        """, "name = guest", "('admin', 'guest') = ('admin', 'guest')", "name in ('admin', 'guest') = True");
+    }
+
+    @Test
+    public void testIsNoneExpressions() throws Throwable {
+        // The None operand is folded into the IsNone operation, so it is not an expression itself.
+        assertExpressionResults("""
+                        name = 'guest'
+                        missing = name is None
+                        """, "name = guest", "name is None = False");
+    }
+
+    @Test
+    public void testChainedComparisonExpressions() throws Throwable {
+        // The middle operand is shared by both comparisons, but evaluated and reported only once.
+        assertExpressionResults("""
+                        name = 'guest'
+                        fits = 1 < len(name) < 10
+                        """, "1 = 1", "len(name) = 5", "10 = 10", "1 < len(name) < 10 = True");
+    }
+
+    @Test
+    public void testShortCircuitedChainedComparisonExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        fits = 10 < len(name) < 20
+                        """, "10 = 10", "len(name) = 5", "10 < len(name) < 20 = False");
+    }
+
+    @Test
+    public void testNestedComparisonExpressions() throws Throwable {
+        // The inner comparison is an operand of the outer one, but reported only once.
+        assertExpressionResults("""
+                        name = 'guest'
+                        same = (name == 'admin') == False
+                        """, "name = guest", "'admin' = admin", "name == 'admin' = False", "False = False", "(name == 'admin') == False = True");
+    }
+
+    @Test
+    public void testNegatedMembershipTestExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        found = not (name in ('admin', 'guest'))
+                        """, "name = guest", "('admin', 'guest') = ('admin', 'guest')", "not (name in ('admin', 'guest')) = False");
+    }
+
+    @Test
+    public void testNegatedIsNoneExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        present = not (name is None)
+                        """, "name = guest", "not (name is None) = True");
+    }
+
+    @Test
+    public void testIsNoneConditionExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        if name is None:
+                            pass
+                        if name is not None:
+                            pass
+                        """, "name = guest", "name is None = False", "name = guest", "name is not None = True");
+    }
+
+    @Test
+    public void testNegatedIsNoneConditionExpressions() throws Throwable {
+        assertExpressionResults("""
+                        name = 'guest'
+                        if not (name is None):
+                            pass
+                        """, "name = guest", "not (name is None) = True");
+    }
+
+    // Steps into every expression of the code and checks the "text = value" of each expression
+    private void assertExpressionResults(String code, String... expected) {
+        final Source source = Source.newBuilder("python", code, "test_expressions.py").buildLiteral();
+        final StepConfig step = StepConfig.newBuilder().sourceElements(SourceElement.EXPRESSION).suspendAnchors(SourceElement.EXPRESSION, SuspendAnchor.AFTER).build();
+
+        try (final DebuggerSession session = tester.startSession(SourceElement.EXPRESSION)) {
+            session.suspendNextExecution();
+            tester.startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                assertEquals(SuspendAnchor.BEFORE, event.getSuspendAnchor());
+                event.prepareStepInto(step);
+            });
+
+            for (String expectedResult : expected) {
+                expectSuspended((SuspendedEvent event) -> {
+                    assertEquals(SuspendAnchor.AFTER, event.getSuspendAnchor());
+                    DebugValue value = event.getReturnValue();
+                    assertNotNull(value);
+                    String display = value.isString() ? value.asString() : value.toDisplayString();
+                    assertEquals(expectedResult, event.getSourceSection().getCharacters() + " = " + display);
+                    event.prepareStepInto(step);
+                });
+            }
+            tester.expectDone();
         }
     }
 

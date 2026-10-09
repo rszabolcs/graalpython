@@ -42,6 +42,8 @@ package com.oracle.graal.python.compiler;
 
 import java.math.BigInteger;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 import com.oracle.graal.python.builtins.objects.PNone;
 import com.oracle.graal.python.builtins.objects.bytes.PBytes;
@@ -81,6 +83,7 @@ import com.oracle.graal.python.pegparser.sst.SSTNode;
 import com.oracle.graal.python.pegparser.sst.StmtTy;
 import com.oracle.graal.python.pegparser.sst.TypeParamTy;
 import com.oracle.graal.python.pegparser.sst.UnaryOpTy;
+import com.oracle.graal.python.pegparser.tokenizer.SourceRange;
 import com.oracle.graal.python.runtime.exception.PException;
 import com.oracle.graal.python.runtime.sequence.storage.ByteSequenceStorage;
 import com.oracle.graal.python.util.PythonUtils;
@@ -94,6 +97,7 @@ public final class AstOptimizer implements BaseBytecodeDSLVisitor<ExprTy> {
 
     private final int optimizationLevel;
     private final boolean futureAnnotations;
+    private final Map<ExprTy.Compare, SourceRange> negatedComparisons = new IdentityHashMap<>();
 
     private AstOptimizer(int optimizationLevel, boolean futureAnnotations) {
         this.optimizationLevel = optimizationLevel;
@@ -101,8 +105,18 @@ public final class AstOptimizer implements BaseBytecodeDSLVisitor<ExprTy> {
     }
 
     @TruffleBoundary
-    public static void optimize(ModTy mod, int optimizationLevel, boolean futureAnnotations) {
-        mod.accept(new AstOptimizer(optimizationLevel, futureAnnotations || hasFutureAnnotations(mod)));
+    public static AstOptimizer optimize(ModTy mod, int optimizationLevel, boolean futureAnnotations) {
+        AstOptimizer optimizer = new AstOptimizer(optimizationLevel, futureAnnotations || hasFutureAnnotations(mod));
+        mod.accept(optimizer);
+        return optimizer;
+    }
+
+    /**
+     * Returns the source range of the {@code not} expression that was folded into the comparison,
+     * or {@code null} if no {@code not} was folded into it.
+     */
+    public SourceRange getNegatedRange(ExprTy.Compare compare) {
+        return negatedComparisons.get(compare);
     }
 
     @Override
@@ -159,7 +173,9 @@ public final class AstOptimizer implements BaseBytecodeDSLVisitor<ExprTy> {
         if (node.op == UnaryOpTy.Not && node.operand instanceof ExprTy.Compare compare && compare.ops.length == 1) {
             CmpOpTy inverted = invertComparison(compare.ops[0]);
             if (inverted != null) {
-                return new ExprTy.Compare(compare.left, new CmpOpTy[]{inverted}, compare.comparators, compare.getSourceRange());
+                ExprTy.Compare negated = new ExprTy.Compare(compare.left, new CmpOpTy[]{inverted}, compare.comparators, compare.getSourceRange());
+                negatedComparisons.put(negated, node.getSourceRange());
+                return negated;
             }
         }
         ConstantValue operand = getConstant(node.operand);

@@ -159,6 +159,7 @@ import com.oracle.truffle.api.bytecode.BytecodeRootNodes;
 import com.oracle.truffle.api.bytecode.StackValue;
 import com.oracle.truffle.api.bytecode.serialization.BytecodeSerializer;
 import com.oracle.truffle.api.debug.DebuggerTags;
+import com.oracle.truffle.api.instrumentation.StandardTags.ExpressionTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.StatementTag;
 import com.oracle.truffle.api.strings.TruffleString;
 
@@ -2746,7 +2747,7 @@ public final class RootNodeCompiler implements BaseBytecodeDSLVisitor<BytecodeDS
          */
         @Override
         public Void visit(ExprTy.Compare node) {
-            beginSourceSection(node, b);
+            beginCompareExpression(node);
             checkCompare(ctx.errorCallback, node);
 
             boolean multipleComparisons = node.comparators.length > 1;
@@ -2783,7 +2784,7 @@ public final class RootNodeCompiler implements BaseBytecodeDSLVisitor<BytecodeDS
                 }
 
                 if (i == 0) {
-                    node.left.accept(this);
+                    visitOperand(node.left);
                 } else {
                     // LHS stashed on stack from previous comparison.
                     b.emitLoadStackValue(tmp);
@@ -2795,12 +2796,12 @@ public final class RootNodeCompiler implements BaseBytecodeDSLVisitor<BytecodeDS
                     b.endIsNotNone();
                 } else {
                     if (i == node.comparators.length - 1) {
-                        node.comparators[i].accept(this);
+                        visitOperand(node.comparators[i]);
                     } else {
                         // Stash RHS on stack for next comparison.
                         b.beginBlock();
                         b.beginStoreStackValue(tmp);
-                        node.comparators[i].accept(this);
+                        visitOperand(node.comparators[i]);
                         b.endStoreStackValue();
                         b.emitLoadStackValue(tmp);
                         b.endBlock();
@@ -2816,8 +2817,49 @@ public final class RootNodeCompiler implements BaseBytecodeDSLVisitor<BytecodeDS
                 b.endBlock();
             }
 
-            endSourceSection(b);
+            endCompareExpression(node);
             return null;
+        }
+
+        /**
+         * A comparison that a {@code not} was folded into produces the value of the whole {@code not}
+         * expression, so its tag covers that expression while the comparison keeps its own source
+         * section.
+         */
+        private void beginCompareExpression(ExprTy.Compare node) {
+            SourceRange negatedRange = ctx.astOptimizer.getNegatedRange(node);
+            if (negatedRange == null) {
+                beginSourceSection(node, b);
+                b.beginTag(ExpressionTag.class);
+            } else {
+                beginSourceSectionInner(b, negatedRange);
+                b.beginTag(ExpressionTag.class);
+                beginSourceSection(node, b);
+            }
+        }
+
+        private void endCompareExpression(ExprTy.Compare node) {
+            if (ctx.astOptimizer.getNegatedRange(node) != null) {
+                endSourceSection(b);
+                b.endTag(ExpressionTag.class);
+                endSourceSection(b);
+            } else {
+                b.endTag(ExpressionTag.class);
+                endSourceSection(b);
+            }
+        }
+
+        // A nested comparison tags itself, so it is not tagged again as an operand.
+        private void visitOperand(ExprTy operand) {
+            if (operand instanceof ExprTy.Compare) {
+                operand.accept(this);
+                return;
+            }
+            beginSourceSectionInner(b, operand.getSourceRange());
+            b.beginTag(ExpressionTag.class);
+            operand.accept(this);
+            b.endTag(ExpressionTag.class);
+            b.endSourceSection();
         }
 
         private void warn(SSTNode node, String message, Object... arguments) {
@@ -4954,18 +4996,21 @@ public final class RootNodeCompiler implements BaseBytecodeDSLVisitor<BytecodeDS
                 return false;
             }
 
-            if (cmp.ops[0] == CmpOpTy.Is) {
-                b.beginIsNone();
-                cmp.left.accept(this);
-                b.endIsNone();
-            } else if (cmp.ops[0] == CmpOpTy.IsNot) {
-                b.beginIsNotNone();
-                cmp.left.accept(this);
-                b.endIsNotNone();
-            } else {
+            if (cmp.ops[0] != CmpOpTy.Is && cmp.ops[0] != CmpOpTy.IsNot) {
                 return false;
             }
 
+            beginCompareExpression(cmp);
+            if (cmp.ops[0] == CmpOpTy.Is) {
+                b.beginIsNone();
+                visitOperand(cmp.left);
+                b.endIsNone();
+            } else {
+                b.beginIsNotNone();
+                visitOperand(cmp.left);
+                b.endIsNotNone();
+            }
+            endCompareExpression(cmp);
             return true;
         }
 
